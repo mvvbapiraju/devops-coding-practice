@@ -1,0 +1,152 @@
+name: python-ci
+on:
+  push:
+    # Run on everything except the root README and .idea
+    paths:
+      - '**'
+      - '!README.md'
+      - '!.idea/**'
+  pull_request:
+    paths:
+      - '**'
+      - '!README.md'
+      - '!.idea/**'
+  workflow_dispatch:
+    inputs:
+      run_mode:
+        description: 'Which orgs to run'
+        required: true
+        default: 'changed'
+        type: choice
+        options:
+          - changed   # only top-level orgs that changed in this push/PR
+          - all       # run all discovered orgs
+          - custom    # run only a provided list (see custom_orgs)
+      custom_orgs:
+        description: 'Comma/space-separated org names when run_mode=custom (e.g., "Barclays, CGI")'
+        required: false
+        type: string
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      orgs: ${{ steps.set-matrix.outputs.orgs }}
+      all_orgs: ${{ steps.set-matrix.outputs.all_orgs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # so diffs to base commit work for PRs
+      - id: set-matrix
+        env:
+          RUN_MODE: ${{ (github.event_name == 'workflow_dispatch' && inputs.run_mode) || 'changed' }}
+          CUSTOM_ORGS: ${{ (github.event_name == 'workflow_dispatch' && inputs.custom_orgs) || '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # --- 1) Discover all orgs: top-level dirs with run_ci.py + requirements.txt
+          mapfile -t ALL_ORGS < <(for d in */ ; do
+            d="${d%/}"
+            [[ "$d" == ".github" || "$d" == ".idea" || "$d" == .* ]] && continue
+            [[ -f "$d/run_ci.py" && -f "$d/requirements.txt" ]] && echo "$d"
+          done | sort -u)
+
+          # --- 2) Detect changed files between base and head
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.sha }}"
+            git fetch --no-tags --prune --depth=1 origin "${BASE}" || true
+          else
+            BASE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+          fi
+
+          if [[ -n "${BASE}" ]]; then
+            mapfile -t CHANGED < <(git diff --name-only "${BASE}" "${HEAD}" || true)
+          else
+            # First push on a new branch, or unknown base → consider all files
+            mapfile -t CHANGED < <(git ls-tree -r --name-only "${HEAD}" || true)
+          fi
+
+          # Did CI files change?
+          CI_CHANGED="false"
+          for f in "${CHANGED[@]}"; do
+            [[ "$f" == .github/* ]] && CI_CHANGED="true"
+          done
+
+          # Top-level dirs that changed (ignore infra/hidden)
+          declare -A DIRS=()
+          for f in "${CHANGED[@]}"; do
+            [[ "$f" != */* ]] && continue
+            d="${f%%/*}"
+            [[ -z "$d" ]] && continue
+            [[ "$d" == ".github" || "$d" == ".idea" || "$d" == .* ]] && continue
+            DIRS["$d"]=1
+          done
+
+          CHANGED_ORGS=()
+          for org in "${ALL_ORGS[@]}"; do
+            if [[ -n "${DIRS[$org]:-}" ]]; then
+              CHANGED_ORGS+=("$org")
+            fi
+          done
+
+          # --- 3) Apply run mode / manual override
+          FINAL=()
+          case "${RUN_MODE}" in
+            all)
+              FINAL=("${ALL_ORGS[@]}")
+              ;;
+            custom)
+              # split on commas and/or spaces
+              RAW="${CUSTOM_ORGS//,/ }"
+              declare -A WANT=()
+              for w in $RAW; do
+                WANT["$w"]=1
+              done
+              for org in "${ALL_ORGS[@]}"; do
+                [[ -n "${WANT[$org]:-}" ]] && FINAL+=("$org")
+              done
+              ;;
+            changed|*)
+              if [[ ${#CHANGED_ORGS[@]} -eq 0 && "${CI_CHANGED}" == "true" ]]; then
+                # If only CI changed, run all orgs to validate the pipeline
+                FINAL=("${ALL_ORGS[@]}")
+              else
+                FINAL=("${CHANGED_ORGS[@]}")
+              fi
+              ;;
+          esac
+
+          # --- 4) Emit JSON arrays for the matrix
+          all_json="$(printf '%s\n' "${ALL_ORGS[@]}" | jq -R -s -c 'split("\n")[:-1]')"
+          final_json="$(printf '%s\n' "${FINAL[@]}"     | jq -R -s -c 'split("\n")[:-1]')"
+
+          echo "All orgs:      ${all_json}"
+          echo "Selected orgs: ${final_json}"
+          echo "all_orgs=${all_json}" >> "$GITHUB_OUTPUT"
+          echo "orgs=${final_json}"    >> "$GITHUB_OUTPUT"
+  build:
+    needs: discover
+    if: ${{ needs.discover.outputs.orgs != '[]' }}   # skip when nothing selected
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        org: ${{ fromJSON(needs.discover.outputs.orgs) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles(format('{0}/requirements.txt', matrix.org)) }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      - name: Install deps (per org)
+        run: pip install -r "${{ matrix.org }}/requirements.txt"
+      - name: Run org CI
+        run: python "${{ matrix.org }}/run_ci.py"

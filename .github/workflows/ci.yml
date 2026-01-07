@@ -23,11 +23,11 @@ on:
           - all       # run all discovered orgs
           - custom    # run only a provided list (see custom_orgs)
       custom_orgs:
-        description: 'Comma/space-separated org names when run_mode=custom (e.g., "Barclays, CGI")'
+        description: 'Comma/space-separated org names when run_mode=custom (e.g., "Org1, Org2")'
         required: false
         type: string
 jobs:
-  discover:
+  prepare:
     runs-on: ubuntu-latest
     outputs:
       orgs: ${{ steps.set-matrix.outputs.orgs }}
@@ -127,13 +127,13 @@ jobs:
           echo "all_orgs=${all_json}" >> "$GITHUB_OUTPUT"
           echo "orgs=${final_json}"    >> "$GITHUB_OUTPUT"
   build:
-    needs: discover
-    if: ${{ needs.discover.outputs.orgs != '[]' }}   # skip when nothing selected
+    needs: prepare
+    if: ${{ needs.prepare.outputs.orgs != '[]' }}   # skip when nothing selected
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        org: ${{ fromJSON(needs.discover.outputs.orgs) }}
+        org: ${{ fromJSON(needs.prepare.outputs.orgs) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

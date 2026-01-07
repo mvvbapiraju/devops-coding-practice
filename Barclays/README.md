@@ -37,12 +37,18 @@ python run_ci.py
 ## How to create & push a new GitHub repo
 ```bash
 # From this folder:
+
+## If remote git repo deoesn't exist
 git init
 git checkout -b main
 git add .
 git commit -m "Initial commit: Barclays DevOps interview practice pack"
-
 # Create an empty repo on GitHub (web UI), then set the remote and push:
-git remote add origin https://github.com/<your-username>/barclays-devops-practice.git
+git remote add origin https://github.com/<your-username>/devops-coding-practice.git
 git push -u origin main
+
+##
+git add .
+git commit -m "Initial commit: Barclays DevOps interview practice pack"
+git push
 ```
